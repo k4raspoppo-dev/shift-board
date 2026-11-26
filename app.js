@@ -12,8 +12,12 @@
  *   8. Views        TodayView / WeekView / ComingSoon / SettingsView
  *   9. App          タブ切替・イベント・時計・起動
  *
+ * タブ3・4 は別ファイル（index.html で app.js より先に読み込む。中身は定義だけ）
+ *   timer.js  Sound / Alerts / Ignite / TimerLogic / TimerView（撤退タイマー・通知）
+ *   kpi.js    Kpi / KpiView（KPI記録・分析）
+ *
  * タブを追加するとき：CONFIG.TABS に1行足し、Views に同じ id の描画オブジェクトを1つ足す。
- * ES Modules は file:// で動かないため、1ファイル内を名前空間で区切っている。
+ * ES Modules は file:// で動かないため、クラシックスクリプトを名前空間で区切っている。
  */
 "use strict";
 
@@ -22,14 +26,14 @@
  * ==================================================================== */
 const CONFIG = Object.freeze({
   STORAGE_KEY: "shiftBoard.v1",
-  SCHEMA: 1,
+  SCHEMA: 2, // 2: 枠に test（A/Bテスト変数）、data.kpi（KPI記録）を追加
   PUBLIC_URL: "https://k4raspoppo-dev.github.io/shift-board/",
 
   TABS: [
     { id: "today", label: "今日", icon: "◉" },
     { id: "week", label: "週間シフト", icon: "▦" },
-    { id: "timer", label: "タイマー", icon: "⏱", soon: true },
-    { id: "kpi", label: "KPI", icon: "▲", soon: true },
+    { id: "timer", label: "タイマー", icon: "⏱" },
+    { id: "kpi", label: "KPI", icon: "▲" },
   ],
 
   SLOT_ORDER: ["morning", "noon", "night"],
@@ -58,10 +62,18 @@ const CONFIG = Object.freeze({
   MAX_DOUBLE_DAYS: 3, // 朝＋夜の両方ONにする日の上限（週）
   MIN_REST_DAYS: 1, // 完全配信OFFの日の下限（週）
 
-  DEFAULT_ROUTINE: ["飲み物を準備", "切り抜き投稿を確認", "配信ソフトを起動", "音量チェック"],
+  DEFAULT_ROUTINE: ["飲み物・喉ケア準備", "30〜60分前の切り抜き投稿完了", "画面ルール表示・音量確認", "余計な娯楽タブ・アプリを閉じた"],
   DEFAULT_NG_WORDS: ["仕事", "本業", "出勤", "勤務", "バイト", "職場"],
   ROUTINE_SOFT_LIMIT: 6,
 
+  PRE_ALERT_MIN: 15, // 枠の開始何分前に知らせるか
+  IGNITE_MIN: 5, // 着火タイマーの長さ
+  TIMER_PRESETS: { flow: 150, stock: 120 },
+  LOSS_CUT_MIN: 50, // フロー枠の損切り判定（経過分）
+  OVERTIME_LIMIT_MIN: 15, // 予定終了後に許す延長の上限
+  TIMER_STALE_HOURS: 12, // これ以上動きっぱなしのタイマーは終了確認を出す
+
+  SYNC_WARN_BYTES: 800 * 1024, // Apps Script 側の上限は 1MB
   SYNC_DEBOUNCE_MS: 2000,
   SYNC_POLL_MS: 5 * 60 * 1000,
   TICK_MS: 30 * 1000,
@@ -153,7 +165,7 @@ const Store = {
 
   defaultSlot(k) {
     const d = CONFIG.SLOTS[k];
-    return { on: false, start: d.start, end: d.end, kind: d.kind, memo: "", lock: null, manual: false };
+    return { on: false, start: d.start, end: d.end, kind: d.kind, memo: "", test: "", lock: null, manual: false };
   },
   emptyDay() {
     const slots = {};
@@ -168,6 +180,7 @@ const Store = {
       jobLabels: { ...CONFIG.JOB_DEFAULT_LABELS },
       ngWords: [...CONFIG.DEFAULT_NG_WORDS],
       prefs: { suggestNoonOnShiftC: false },
+      kpi: { logs: [] },
     };
   },
   defaultLocal() {
@@ -176,6 +189,13 @@ const Store = {
       nightFormat: "sameDay", // sameDay: 24:00〜26:00 / nextDay: 翌日 0:00〜2:00
       hideJob: false,
       installDismissed: false,
+      // ↓ この端末だけで持つ（同期しない）
+      timer: null, // 撤退タイマーの進行状態
+      ignite: null, // 5分着火タイマー
+      kpiDraft: null, // KPI 入力中の下書き
+      kpiView: { period: "30", kind: "all", sort: "coin", limit: 30 },
+      sound: { muted: false, preAlert: true, calm: false },
+      alerted: {}, // 15分前通知の記録 { "YYYY-MM-DD:枠": 1=通知済み / 2=閉じた }
       sync: { url: "", key: "", device: "PC", includeJob: true, rev: 0, dirty: false, lastSyncAt: null, lastError: null },
     };
   },
@@ -188,6 +208,8 @@ const Store = {
     d.prefs = { ...base.prefs, ...(d.prefs || {}) };
     if (!Array.isArray(d.routineItems)) d.routineItems = base.routineItems;
     if (!Array.isArray(d.ngWords)) d.ngWords = base.ngWords;
+    const logs = Array.isArray(d.kpi?.logs) ? d.kpi.logs.filter((r) => r && typeof r === "object" && r.id) : [];
+    d.kpi = { ...(d.kpi && typeof d.kpi === "object" ? d.kpi : {}), logs: typeof Kpi !== "undefined" ? logs.map(Kpi.normalize) : logs };
     for (const wk of Object.values(d.weeks || {})) {
       if (!Array.isArray(wk.days) || wk.days.length !== 7) wk.days = Array.from({ length: 7 }, Store.emptyDay);
       wk.days = wk.days.map((day) => {
@@ -209,8 +231,12 @@ const Store = {
     } catch (e) {
       raw = null;
     }
-    const local = { ...Store.defaultLocal(), ...(raw?.local || {}) };
-    local.sync = { ...Store.defaultLocal().sync, ...(raw?.local?.sync || {}) };
+    const def = Store.defaultLocal();
+    const local = { ...def, ...(raw?.local || {}) };
+    local.sync = { ...def.sync, ...(raw?.local?.sync || {}) };
+    local.sound = { ...def.sound, ...(raw?.local?.sound || {}) };
+    local.kpiView = { ...def.kpiView, ...(raw?.local?.kpiView || {}) };
+    if (!local.alerted || typeof local.alerted !== "object") local.alerted = {};
     Store.state = { data: Store.migrateData(raw?.data), local };
     Store.pruneChecks();
   },
@@ -222,8 +248,11 @@ const Store = {
       UI.toast("保存できませんでした（ブラウザの保存領域を確認してください）");
     }
   },
+  editSeq: 0, // 同期対象を変更するたびに増える（送信中の変更を取りこぼさないため）
+
   // 同期対象のデータを変更したとき
   save() {
+    Store.editSeq++;
     Store.state.local.sync.dirty = true;
     Store.write();
     Sync.schedule();
@@ -265,6 +294,7 @@ const Store = {
   pruneChecks() {
     const keep = Util.dateKey(Util.addDays(new Date(), -7));
     for (const k of Object.keys(Store.local.routineChecks)) if (k < keep) delete Store.local.routineChecks[k];
+    for (const k of Object.keys(Store.local.alerted)) if (k.slice(0, 10) < keep) delete Store.local.alerted[k];
   },
 
   exportJSON() {
@@ -312,6 +342,7 @@ const ShiftLogic = {
         const old = oldDays[i]?.slots?.[k];
         if (old) {
           s.memo = old.memo || "";
+          s.test = old.test || "";
           s.start = old.start || s.start;
           s.end = old.end || s.end;
           s.kind = old.kind || s.kind;
@@ -479,6 +510,9 @@ const Sync = {
   pollTimer: null,
   busy: false,
   sending: false,
+  pulling: false,
+  resolving: false, // 競合ダイアログを出している間は送受信を止める
+  lastBytes: 0, // 直近に送ったデータの大きさ
 
   get cfg() {
     return Store.local.sync;
@@ -506,6 +540,7 @@ const Sync = {
         offline: "通信できませんでした（電波・URLを確認）",
         busy: "サーバーが混み合っています",
         bad_request: "送信データが不正です",
+        too_large: "データ容量が上限（1MB）を超えました。KPIをCSVに書き出し、古い記録を整理してください",
       }[code] ||
       code ||
       ""
@@ -513,7 +548,7 @@ const Sync = {
   },
 
   schedule() {
-    if (!Sync.enabled()) return;
+    if (!Sync.enabled() || Sync.resolving) return;
     clearTimeout(Sync.timer);
     Sync.timer = setTimeout(() => Sync.push(), CONFIG.SYNC_DEBOUNCE_MS);
   },
@@ -529,6 +564,7 @@ const Sync = {
   },
 
   apply(res) {
+    let needPush = false;
     if (res.data) {
       const incoming = res.data;
       if (incoming.jobStripped) {
@@ -539,25 +575,36 @@ const Sync = {
         }
         incoming.jobLabels = Store.data.jobLabels;
       }
+      // KPI 記録は id ごとに合流させる（どちらかにしかない記録も消さない）
+      const mine = Store.data.kpi?.logs || [];
+      const theirs = incoming.kpi?.logs || [];
+      const merged = typeof Kpi !== "undefined" ? Kpi.merge(mine, theirs) : theirs.length ? theirs : mine;
+      needPush = typeof Kpi !== "undefined" && Kpi.differs(merged, theirs);
+      incoming.kpi = { ...(incoming.kpi || {}), logs: merged };
       Store.state.data = Store.migrateData(incoming);
     }
-    Object.assign(Sync.cfg, { rev: res.rev, dirty: false, lastSyncAt: new Date().toISOString(), lastError: null });
+    Object.assign(Sync.cfg, { rev: res.rev, dirty: needPush, lastSyncAt: new Date().toISOString(), lastError: null });
     Store.write();
-    App.render();
+    App.safeRender();
+    if (needPush) Sync.schedule(); // 手元にしかない KPI 記録をドライブへ戻す
   },
 
   async push(force = false) {
-    if (!Sync.enabled()) return;
+    if (!Sync.enabled() || Sync.resolving) return;
     if (Sync.busy) return Sync.schedule();
     Sync.busy = true;
     Sync.sending = true;
     UI.renderSyncStatus();
     let conflict = null;
+    const seq = Store.editSeq;
     try {
-      const res = await Sync.call("push", { baseRev: Sync.cfg.rev, data: Sync.payload(), force });
-      if (res.ok) Object.assign(Sync.cfg, { rev: res.rev, dirty: false, lastSyncAt: new Date().toISOString(), lastError: null });
+      const data = Sync.payload();
+      Sync.lastBytes = new Blob([JSON.stringify(data)]).size;
+      const res = await Sync.call("push", { baseRev: Sync.cfg.rev, data, force });
+      // 送信中に編集された分は未送信のまま残す
+      if (res.ok) Object.assign(Sync.cfg, { rev: res.rev, dirty: Store.editSeq !== seq, lastSyncAt: new Date().toISOString(), lastError: null });
       else if (res.error === "conflict") conflict = res;
-      else Sync.cfg.lastError = res.error;
+      else Sync.cfg.lastError = res.error === "bad_request" && Sync.lastBytes > 950 * 1024 ? "too_large" : res.error;
     } catch (e) {
       Sync.cfg.lastError = "offline";
     } finally {
@@ -567,11 +614,14 @@ const Sync = {
       UI.renderSyncStatus();
     }
     if (conflict) await Sync.resolveConflict(conflict);
+    else if (Sync.cfg.dirty && !Sync.cfg.lastError) Sync.schedule();
   },
 
   async pull() {
-    if (!Sync.enabled() || Sync.busy) return;
+    if (!Sync.enabled() || Sync.busy || Sync.resolving) return;
     Sync.busy = true;
+    Sync.pulling = true;
+    UI.renderSyncStatus();
     let res = null;
     try {
       res = await Sync.call("pull");
@@ -580,6 +630,7 @@ const Sync = {
       Sync.cfg.lastError = "offline";
     } finally {
       Sync.busy = false;
+      Sync.pulling = false;
       Store.write();
       UI.renderSyncStatus();
     }
@@ -603,17 +654,42 @@ const Sync = {
   },
 
   async resolveConflict(res) {
+    if (Sync.resolving) return;
+    Sync.resolving = true;
+    clearTimeout(Sync.timer);
+    try {
+      await Sync.askConflict(res);
+    } finally {
+      Sync.resolving = false;
+    }
+    if (Sync.pendingPush) {
+      Sync.pendingPush = false;
+      Sync.push();
+    }
+  },
+
+  async askConflict(res) {
     const when = res.updatedAt ? `${Util.md(new Date(res.updatedAt))} ${Util.hm(new Date(res.updatedAt))}` : "不明な時刻";
     const choice = await UI.choose({
       title: "別の端末で更新されています",
-      body: `<p>「${Util.esc(res.device || "別の端末")}」で ${Util.esc(when)} に保存された内容があります。<br>この端末でも未送信の変更があります。どちらを残しますか？</p>`,
+      body: `<p>「${Util.esc(res.device || "別の端末")}」で ${Util.esc(when)} に保存された内容があります。<br>この端末でも未送信の変更があります。シフト・設定はどちらを残しますか？</p><p class="hint muted">KPI記録は、どちらを選んでも両方の端末の分が残ります。</p>`,
       options: [
         { value: "remote", label: "ドライブ側を取り込む", variant: "primary" },
         { value: "local", label: "この端末の内容で上書き", variant: "danger" },
       ],
     });
-    if (choice === "remote") Sync.apply(res);
-    else if (choice === "local") Sync.push(true);
+    if (choice === "remote") {
+      Sync.apply(res);
+    } else if (choice === "local") {
+      // シフト・設定は手元を残し、KPI 記録は両方を合流させてから、ドライブ側の版を基準に送り直す
+      // （force は使わない。ダイアログ中に別端末が更新していたら、もう一度確認する）
+      if (typeof Kpi !== "undefined") Store.data.kpi.logs = Kpi.merge(Store.data.kpi.logs, res.data?.kpi?.logs || []);
+      Sync.cfg.rev = res.rev;
+      Sync.cfg.dirty = true;
+      Store.write();
+      Sync.pendingPush = true;
+      App.safeRender();
+    }
   },
 
   startPolling() {
@@ -681,14 +757,26 @@ const UI = {
     const s = Sync.cfg;
     let text;
     let tone;
+    const big = Sync.lastBytes > CONFIG.SYNC_WARN_BYTES;
     if (!Sync.enabled()) [text, tone] = ["☁ 同期オフ", "muted"];
-    else if (Sync.sending) [text, tone] = ["☁ 送信中…", "secondary"];
+    else if (Sync.sending || Sync.pulling) [text, tone] = ["☁ 同期中…", "secondary"];
     else if (s.lastError) [text, tone] = [s.dirty ? "☁ 未送信あり" : "☁ 同期エラー", "caution"];
     else if (s.dirty) [text, tone] = ["☁ 送信待ち", "secondary"];
-    else [text, tone] = [`☁ 同期済み ${s.lastSyncAt ? Util.hm(new Date(s.lastSyncAt)) : ""}`, "muted"];
+    else [text, tone] = [`☁ 同期完了 ${s.lastSyncAt ? Util.hm(new Date(s.lastSyncAt)) : ""}`, big ? "caution" : "muted"];
+    if (big && !s.lastError) text += " ⚠容量";
     el.textContent = text;
     el.dataset.tone = tone;
-    el.title = s.lastError ? Sync.errorText(s.lastError) : "同期設定を開く";
+    el.title = s.lastError
+      ? Sync.errorText(s.lastError)
+      : big
+        ? `同期データが ${Math.round(Sync.lastBytes / 1024)}KB あります（上限 1024KB）。KPIをCSVに書き出し、古い記録の整理を検討してください`
+        : "同期設定を開く";
+    const now = document.getElementById("syncNow");
+    if (now) {
+      now.hidden = !Sync.enabled();
+      now.disabled = Sync.busy || Sync.resolving;
+      now.dataset.spin = String(Sync.sending || Sync.pulling);
+    }
   },
 
   // ---- ダイアログ（<dialog> を1つ使い回す）
@@ -747,8 +835,8 @@ const UI = {
     }
   },
 
-  download(filename, text) {
-    const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  download(filename, text, type = "application/json") {
+    const url = URL.createObjectURL(new Blob([text], { type }));
     const a = Object.assign(document.createElement("a"), { href: url, download: filename });
     document.body.appendChild(a);
     a.click();
@@ -777,7 +865,7 @@ const TodayView = {
         const start = date.getTime() + Util.toMin(s.start) * 60000;
         const end = date.getTime() + Util.toMin(s.end) * 60000;
         if (!own && end <= today.getTime()) continue;
-        items.push({ k, s, start, end, own });
+        items.push({ k, s, start, end, own, date: Util.dateKey(date) });
       }
     };
     push(Util.addDays(today, -1), Store.getDay(Util.addDays(today, -1)), false);
@@ -867,9 +955,35 @@ const TodayView = {
         </div>
         <div class="hero-time num">${Util.esc(it.s.start)}<span class="hero-dash">–</span>${Util.esc(it.s.end)}</div>
         ${it.s.memo ? `<div class="hero-memo">📝 ${Util.esc(it.s.memo)}</div>` : `<div class="hero-memo muted">企画メモなし</div>`}
+        ${it.s.test ? `<div class="hero-test">🧪 ${Util.esc(it.s.test)}</div>` : ""}
         <div class="hero-rel">${rel}</div>
         ${live ? `<div class="progress" aria-hidden="true"><span style="width:${pct.toFixed(1)}%"></span></div>` : ""}
+        <div class="hero-actions">
+          ${TodayView.startButton(it.date, it.k, true)}
+          ${TodayView.igniteBox(it, now)}
+        </div>
       </section>`;
+  },
+
+  // 「この枠で配信開始」：枠の情報を撤退タイマーへ引き継ぐ
+  startButton(dateKey, k, big = false) {
+    if (typeof TimerView === "undefined") return "";
+    const running = TimerView.isRunningFor(dateKey, k);
+    if (running) return `<button type="button" class="btn ${big ? "big" : "small"}" data-variant="ghost" data-action="tab" data-tab="timer">⏱ タイマーを開く</button>`;
+    return `<button type="button" class="btn ${big ? "big" : "small"}" data-variant="primary" data-action="timer-from-slot" data-date="${dateKey}" data-slot="${k}">▶ この枠で配信開始${big ? "（タイマーへ）" : ""}</button>`;
+  },
+
+  // 5分着火タイマー：開始15分前〜配信中だけ主役カードに出す
+  igniteBox(it, now) {
+    if (typeof Ignite === "undefined") return "";
+    const t = now.getTime();
+    const near = t >= it.start - CONFIG.PRE_ALERT_MIN * 60000 && t < it.end;
+    const rem = Ignite.remaining(t);
+    if (rem !== null) {
+      return `<div class="ignite" data-running="true"><span class="ignite-label">🔥 着火中</span><b class="num ignite-time" data-bind="ignite">${Util.esc(Ignite.format(rem))}</b><button type="button" class="btn small" data-variant="ghost" data-action="ignite-stop">止める</button></div>`;
+    }
+    if (!near) return "";
+    return `<button type="button" class="btn big ignite-btn" data-variant="ghost" data-action="ignite-start" title="まずはソフト起動と音量チェックだけやる">🔥 5分着火タイマー</button>`;
   },
 
   smallCard(k, s, now, today) {
@@ -884,6 +998,8 @@ const TodayView = {
         <div class="slot-card-head"><span>${UI.kindBadge(s.kind)} ${def.label}</span>${done ? '<span class="muted">終了</span>' : ""}</div>
         <div class="slot-card-time">${UI.timeRange(s)}</div>
         ${s.memo ? `<div class="slot-card-memo">${Util.esc(s.memo)}</div>` : ""}
+        ${s.test ? `<div class="slot-card-memo">🧪 ${Util.esc(s.test)}</div>` : ""}
+        ${done ? "" : `<div class="slot-card-actions">${TodayView.startButton(Util.dateKey(today), k)}</div>`}
       </div>`;
   },
 
@@ -920,7 +1036,7 @@ const TodayView = {
     const checked = new Set(Store.local.routineChecks[key] || []);
     const done = items.filter((it) => checked.has(it.id)).length;
     const restDay = day && ShiftLogic.isOff(day);
-    const title = restDay ? "工場日メニュー（任意）" : "配信前ルーチン";
+    const title = restDay ? "工場日メニュー（任意）" : "配信前チェックリスト";
 
     if (TodayView.editing) {
       const rows = items
@@ -934,6 +1050,8 @@ const TodayView = {
           </li>`,
         )
         .join("");
+      const have = new Set(items.map((it) => it.text.trim()));
+      const missing = CONFIG.DEFAULT_ROUTINE.filter((t) => !have.has(t));
       const warn = items.length > CONFIG.ROUTINE_SOFT_LIMIT ? `<p class="hint" data-tone="caution">項目が多いと初動が重くなります（おすすめは3〜4個）</p>` : "";
       return `
         <section class="panel side-card">
@@ -941,6 +1059,7 @@ const TodayView = {
           <ul class="routine-edit">${rows}</ul>${warn}
           <div class="row-gap">
             <button type="button" class="btn" data-variant="ghost" data-action="routine-add">＋ 項目を追加</button>
+            ${missing.length ? `<button type="button" class="btn" data-variant="ghost" data-action="routine-suggest" title="${Util.esc(missing.join(" / "))}">＋ おすすめ項目（${missing.length}）</button>` : ""}
             <button type="button" class="btn" data-variant="primary" data-action="routine-edit-done">完了</button>
           </div>
         </section>`;
@@ -1117,6 +1236,7 @@ const WeekView = {
           <span class="slot-line"><span class="slot-name">${CONFIG.KINDS[s.kind].icon} ${def.label}</span>${lock}${outside}</span>
           ${s.on ? `<span class="slot-time">${UI.timeRange(s)}</span>` : `<span class="slot-time muted">OFF</span>`}
           ${s.on && s.memo ? `<span class="slot-memo">${Util.esc(s.memo)}</span>` : ""}
+          ${s.on && s.test ? `<span class="slot-memo slot-test" title="A/Bテスト変数">🧪 ${Util.esc(s.test)}</span>` : ""}
         </button>
       </div>`;
   },
@@ -1187,6 +1307,9 @@ const WeekView = {
             <input class="input" type="text" name="memo" value="${Util.esc(s.memo)}" list="memoList" placeholder="例：マイクラ妨害、ホラー" autocomplete="off" autofocus>
             <datalist id="memoList">${memos.map((m) => `<option value="${Util.esc(m)}">`).join("")}</datalist>
           </label>
+          <label class="field"><span class="field-label">🧪 今回試す変更点（A/Bテスト変数） <span class="muted small">X告知には出ません</span></span>
+            <input class="input" type="text" name="test" value="${Util.esc(s.test || "")}" maxlength="60" placeholder="例：1コイン妨害追加、タイトル変更" autocomplete="off">
+          </label>
           <p class="form-error" data-form-error hidden></p>
         </div>
         <div class="modal-foot">
@@ -1227,7 +1350,7 @@ const WeekView = {
     }
     WeekView.mutate((wk) => {
       const s = wk.days[i].slots[k];
-      Object.assign(s, { on: fd.get("on") === "on", start, end, kind: fd.get("kind") || s.kind, memo: String(fd.get("memo") || "").trim(), manual: true });
+      Object.assign(s, { on: fd.get("on") === "on", start, end, kind: fd.get("kind") || s.kind, memo: String(fd.get("memo") || "").trim(), test: String(fd.get("test") || "").trim(), manual: true });
     });
     UI.closeModal("saved");
   },
@@ -1294,6 +1417,15 @@ const SettingsView = {
           <textarea class="input" rows="4" data-ng-words>${Util.esc(data.ngWords.join("\n"))}</textarea>
         </section>
 
+        <section class="settings-sec" id="sec-sound">
+          <h3>通知・アラート</h3>
+          <label class="switch-label"><input type="checkbox" role="switch" class="switch" data-sound-bool="preAlert" ${local.sound.preAlert ? "checked" : ""}><span>配信枠の${CONFIG.PRE_ALERT_MIN}分前に知らせる</span></label>
+          <label class="switch-label"><input type="checkbox" role="switch" class="switch" data-sound-bool="muted" ${local.sound.muted ? "checked" : ""}><span>音を消す（画面表示だけにする）</span></label>
+          <label class="switch-label"><input type="checkbox" role="switch" class="switch" data-sound-bool="calm" ${local.sound.calm ? "checked" : ""}><span>控えめ表示（画面を点滅させない。配信画面への映り込み対策）</span></label>
+          <div class="row-gap"><button type="button" class="btn" data-variant="ghost" data-action="sound-test">🔔 テスト再生</button></div>
+          <p class="hint muted">この設定は端末ごとです。iPhone は画面ロック中やアプリが裏にある間、音も通知も出せません。</p>
+        </section>
+
         <section class="settings-sec">
           <h3>表示</h3>
           <label class="switch-label"><input type="checkbox" role="switch" class="switch" data-local-bool="hideJob" ${local.hideJob ? "checked" : ""}><span>今日タブで本業シフト・体調ステータスを隠す（配信画面への映り込み対策）</span></label>
@@ -1301,6 +1433,7 @@ const SettingsView = {
 
         <section class="settings-sec">
           <h3>バックアップ</h3>
+          <p class="hint muted">同期データの大きさ：約 <b class="num">${Math.ceil(new Blob([JSON.stringify(data)]).size / 1024)}</b>KB ／ 上限 1024KB（KPI記録 ${data.kpi.logs.filter((r) => !r.deleted).length}件）</p>
           <div class="row-gap">
             <button type="button" class="btn" data-variant="ghost" data-action="export">⬇ JSONエクスポート</button>
             <label class="btn" data-variant="ghost">⬆ JSONインポート<input type="file" accept="application/json,.json" data-import hidden></label>
@@ -1380,11 +1513,14 @@ const App = {
   tab: "today",
   lastDateKey: Util.dateKey(new Date()),
 
+  needsRender: false,
+
+  // timer.js / kpi.js が読み込めなかった時（古いキャッシュとの混在など）は Coming Soon で代用し、真っ白にしない
   views: {
     today: () => TodayView.render(),
     week: () => WeekView.render(),
-    timer: () => ComingSoon.render("timer"),
-    kpi: () => ComingSoon.render("kpi"),
+    timer: () => (typeof TimerView !== "undefined" ? TimerView.render() : ComingSoon.render("timer")),
+    kpi: () => (typeof KpiView !== "undefined" ? KpiView.render() : ComingSoon.render("kpi")),
   },
 
   renderNav() {
@@ -1402,14 +1538,36 @@ const App = {
     view.setAttribute("aria-labelledby", `tab-${App.tab}`);
     view.dataset.tab = App.tab;
     view.innerHTML = App.views[App.tab]();
+    App.needsRender = false;
     UI.renderSyncStatus();
     App.renderClock();
+    App.fastTick();
+  },
+
+  // 入力中・ダイアログ表示中は描き直さず、あとで描き直す（同期の取り込みなどで入力が消えないように）
+  isBusy() {
+    return UI.modal().open || TodayView.editing || Boolean(document.activeElement?.closest?.("#view") && document.activeElement.matches("input, textarea, select"));
+  },
+  safeRender() {
+    if (App.isBusy()) App.needsRender = true;
+    else App.render();
+  },
+
+  // 1秒ごと：タイマー・着火・通知の判定と、数字だけの書き換え（画面全体は描き直さない）
+  fastTick() {
+    if (typeof Alerts === "undefined") return;
+    try {
+      Alerts.tick(Date.now());
+    } catch (e) {
+      console.error(e);
+    }
   },
 
   setTab(id) {
     if (!App.views[id]) return;
     App.tab = id;
     TodayView.editing = false;
+    document.activeElement?.blur?.();
     App.render();
     window.scrollTo({ top: 0 });
     if (id === "week") {
@@ -1427,14 +1585,14 @@ const App = {
   tick() {
     App.renderClock();
     const key = Util.dateKey(new Date());
-    const busy = UI.modal().open || TodayView.editing || document.activeElement?.matches("input, textarea");
+    const busy = App.isBusy();
     if (key !== App.lastDateKey) {
       App.lastDateKey = key;
       Store.pruneChecks();
       Store.saveLocal();
       if (!busy) App.render();
-    } else if (App.tab === "today" && !busy) {
-      App.render(); // 「あと◯分」とプログレスを更新
+    } else if ((App.tab === "today" || App.needsRender) && !busy) {
+      App.render(); // 「あと◯分」とプログレスを更新（KPI タブは入力の邪魔をしないよう描き直さない）
     }
   },
 
@@ -1444,22 +1602,34 @@ const App = {
     document.addEventListener("change", App.onChange);
     document.addEventListener("input", App.onInput);
     document.addEventListener("submit", (e) => {
-      const form = e.target.closest('[data-form="slot"]');
-      if (form) {
-        e.preventDefault();
-        WeekView.saveEditor(form);
-      }
+      const form = e.target.closest("[data-form]");
+      if (!form) return;
+      e.preventDefault();
+      if (form.dataset.form === "slot") WeekView.saveEditor(form);
+      else if (form.dataset.form === "kpi" && typeof KpiView !== "undefined") KpiView.submit(form);
+      else if (form.dataset.form === "timer-custom" && typeof TimerView !== "undefined") TimerView.startCustom(form);
     });
+    // <details> の開閉（バブリングしないので capture で受ける）
+    document.addEventListener("toggle", (e) => typeof KpiView !== "undefined" && KpiView.onToggle(e.target), true);
+    // 音はユーザー操作の中でしか鳴らせるようにならない（自動再生制限）ため、最初の操作で準備する
+    const unlock = () => typeof Sound !== "undefined" && Sound.unlock();
+    document.addEventListener("pointerdown", unlock, true);
+    document.addEventListener("keydown", unlock, true);
+    // 入力欄からフォーカスが外れたら、保留していた描き直しをする
+    document.addEventListener("focusout", () => setTimeout(() => App.needsRender && !App.isBusy() && App.render(), 0));
     document.addEventListener("keydown", App.onKey);
     UI.modal().addEventListener("click", (e) => {
       if (e.target === UI.modal()) UI.closeModal(); // 背景クリックで閉じる
     });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
+        App.fastTick(); // スリープ・裏タブからの復帰：時刻の差分で即座に追いつく
         App.tick();
         Sync.pull();
       }
     });
+    window.addEventListener("focus", App.fastTick);
+    window.addEventListener("pageshow", App.fastTick);
     window.addEventListener("online", () => Sync.pull());
   },
 
@@ -1469,6 +1639,10 @@ const App = {
     const a = el.dataset.action;
     const wkDays = () => WeekView.days();
 
+    // タブ3・4 と通知の操作は各ファイルに任せる
+    if (/^(timer|ignite|sound|alert)-/.test(a) && typeof TimerView !== "undefined") return TimerView.action(a, el);
+    if (/^kpi-/.test(a) && typeof KpiView !== "undefined") return KpiView.action(a, el);
+
     switch (a) {
       case "tab":
         return App.setTab(el.dataset.tab);
@@ -1476,6 +1650,9 @@ const App = {
         return UI.closeModal(el.dataset.value || "");
       case "open-settings":
         return SettingsView.open(el.dataset.section);
+      case "sync-now":
+        if (Sync.cfg.dirty) return Sync.push();
+        return Sync.pull();
       case "dismiss-install":
         Store.local.installDismissed = true;
         Store.saveLocal();
@@ -1495,6 +1672,12 @@ const App = {
         Store.save();
         App.render();
         return document.querySelector(".routine-edit-row:last-child input")?.focus();
+      case "routine-suggest": {
+        const have = new Set(Store.data.routineItems.map((it) => it.text.trim()));
+        for (const text of CONFIG.DEFAULT_ROUTINE) if (!have.has(text)) Store.data.routineItems.push({ id: Util.uid(), text });
+        Store.save();
+        return App.render();
+      }
       case "routine-del":
         Store.data.routineItems = Store.data.routineItems.filter((it) => it.id !== el.dataset.id);
         Store.save();
@@ -1569,6 +1752,12 @@ const App = {
 
   async onChange(e) {
     const t = e.target;
+    if (t.form?.dataset.form === "kpi" && typeof KpiView !== "undefined") return KpiView.onFormInput(t.form);
+    if (t.dataset.soundBool) {
+      Store.local.sound[t.dataset.soundBool] = t.checked;
+      Store.saveLocal();
+      return App.fastTick();
+    }
     if (t.dataset.routineCheck) {
       const key = Util.dateKey(new Date());
       const set = new Set(Store.local.routineChecks[key] || []);
@@ -1626,6 +1815,7 @@ const App = {
 
   onInput(e) {
     const t = e.target;
+    if (t.form?.dataset.form === "kpi" && typeof KpiView !== "undefined") return KpiView.onFormInput(t.form);
     if (t.dataset.routineText) {
       const it = Store.data.routineItems.find((x) => x.id === t.dataset.routineText);
       if (it) {
@@ -1662,6 +1852,7 @@ const App = {
     App.render();
     App.showInstallBanner();
     setInterval(App.tick, CONFIG.TICK_MS);
+    setInterval(App.fastTick, 1000);
     Sync.startPolling();
     Sync.pull();
     if ("serviceWorker" in navigator && location.protocol === "https:") {

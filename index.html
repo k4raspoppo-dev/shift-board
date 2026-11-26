@@ -13,18 +13,27 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=2">
 </head>
 <body>
-  <header class="app-header">
-    <div class="brand"><span class="brand-dot" aria-hidden="true"></span>配信シフト</div>
-    <nav class="tabnav" role="tablist" aria-label="画面切り替え" id="tabnav"></nav>
-    <div class="header-meta">
-      <button type="button" class="sync-status" id="syncStatus" data-action="open-settings" data-section="sync"></button>
-      <time class="clock num" id="clock"></time>
-      <button type="button" class="icon-btn" data-action="open-settings" aria-label="設定とデータ管理">⚙</button>
-    </div>
-  </header>
+  <div class="app-top">
+    <header class="app-header">
+      <div class="brand"><span class="brand-dot" aria-hidden="true"></span><span class="brand-text">配信シフト</span></div>
+      <nav class="tabnav" role="tablist" aria-label="画面切り替え" id="tabnav"></nav>
+      <div class="header-meta">
+        <button type="button" class="hdr-chip num" id="timerChip" data-action="tab" data-tab="timer" hidden></button>
+        <button type="button" class="hdr-chip" id="soundChip" data-action="sound-unlock" hidden></button>
+        <span class="sync-group">
+          <button type="button" class="sync-status" id="syncStatus" data-action="open-settings" data-section="sync"></button>
+          <button type="button" class="sync-now" id="syncNow" data-action="sync-now" aria-label="今すぐ同期" title="今すぐ同期" hidden>⟳</button>
+        </span>
+        <time class="clock num" id="clock"></time>
+        <button type="button" class="icon-btn" data-action="open-settings" aria-label="設定とデータ管理">⚙</button>
+      </div>
+    </header>
+    <div class="alert-banner" id="alertBanner" role="alert" hidden></div>
+  </div>
+  <div class="flash-overlay" id="flashOverlay" aria-hidden="true"></div>
 
   <div class="install-banner" id="installBanner" hidden>
     <span>📲 Safari の <b>共有ボタン</b> →「<b>ホーム画面に追加</b>」で追加してから使ってください（追加しないと7日間でデータが消えることがあります）</span>
@@ -38,7 +47,10 @@
   <dialog class="modal" id="modal" aria-labelledby="modalTitle"></dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+  <!-- timer.js / kpi.js は定義だけ。起動は app.js の最後で行う -->
   <script src="vendor/qrcode.js"></script>
-  <script src="app.js"></script>
+  <script src="timer.js?v=2"></script>
+  <script src="kpi.js?v=2"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

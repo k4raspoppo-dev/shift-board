@@ -1,7 +1,7 @@
 // オフラインでも最後に開いた内容を表示するための Service Worker（https で開いた時だけ登録される）
 // アプリを更新したら VERSION を上げる
-const VERSION = "shift-board-v1";
-const ASSETS = ["./", "index.html", "style.css", "app.js", "vendor/qrcode.js", "manifest.webmanifest", "icons/icon.svg", "icons/apple-touch-icon.png", "icons/icon-192.png"];
+const VERSION = "shift-board-v2";
+const ASSETS = ["./", "index.html", "style.css?v=2", "timer.js?v=2", "kpi.js?v=2", "app.js?v=2", "vendor/qrcode.js", "manifest.webmanifest", "icons/icon.svg", "icons/apple-touch-icon.png", "icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
