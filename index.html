@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0e1014">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="配信シフト">
+  <title>配信シフト</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand"><span class="brand-dot" aria-hidden="true"></span>配信シフト</div>
+    <nav class="tabnav" role="tablist" aria-label="画面切り替え" id="tabnav"></nav>
+    <div class="header-meta">
+      <button type="button" class="sync-status" id="syncStatus" data-action="open-settings" data-section="sync"></button>
+      <time class="clock num" id="clock"></time>
+      <button type="button" class="icon-btn" data-action="open-settings" aria-label="設定とデータ管理">⚙</button>
+    </div>
+  </header>
+
+  <div class="install-banner" id="installBanner" hidden>
+    <span>📲 Safari の <b>共有ボタン</b> →「<b>ホーム画面に追加</b>」で追加してから使ってください（追加しないと7日間でデータが消えることがあります）</span>
+    <button type="button" class="icon-btn" data-action="dismiss-install" aria-label="閉じる">✕</button>
+  </div>
+
+  <main class="app-main">
+    <div class="view" id="view" role="tabpanel"></div>
+  </main>
+
+  <dialog class="modal" id="modal" aria-labelledby="modalTitle"></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="vendor/qrcode.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
