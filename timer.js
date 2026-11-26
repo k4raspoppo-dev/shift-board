@@ -72,8 +72,23 @@ const Sound = {
   },
 
   /** @returns {boolean} 実際に鳴らせたか */
+  // 同じブラウザでアプリを複数のタブ・ウィンドウで開いていても、通知音は1つのタブ（leader）だけが鳴らす
+  leader: false,
+  claimLeader() {
+    if (Sound.claimed) return;
+    Sound.claimed = true;
+    if (!navigator.locks?.request) return void (Sound.leader = true);
+    navigator.locks
+      .request("shiftBoard-sound-leader", () => {
+        Sound.leader = true;
+        return new Promise(() => {}); // タブを閉じるまで持ち続ける（閉じると次のタブへ移る）
+      })
+      .catch(() => (Sound.leader = true));
+  },
+
   play(name, { volume = 1, force = false } = {}) {
     if (!force && Store.local.sound.muted) return false;
+    if (!force && !Sound.leader) return false;
     const c = Sound.ensure();
     if (!c || c.state !== "running") return false;
     const p = Sound.PATTERNS[name] || Sound.PATTERNS.soft;
@@ -228,7 +243,10 @@ const Alerts = {
 
   tick(now) {
     if (!Store.state) return;
+    Sound.claimLeader();
     Ignite.check(now);
+    const calm = Store.local.sound.calm ? "true" : "";
+    if (document.body.dataset.calm !== calm) document.body.dataset.calm = calm;
     Alerts.checkTimer(now);
     Alerts.checkPre(now);
     Alerts.renderBanner(now);
@@ -241,18 +259,26 @@ const Alerts = {
     const t = Store.local.timer;
     if (!t) return Alerts.setStage(null);
     if (TimerView.isStale(t, now)) return Alerts.setStage(null); // 放置されたタイマーは鳴らさない（画面で終了確認）
-    const fresh = TimerLogic.fresh(t, now);
-    if (fresh.length) {
-      t.fired.push(...fresh);
-      Store.saveLocal();
-      // 一度に複数の段階を越えたら（スリープ復帰など）、一番強い段階の音だけ鳴らす
-      const top = fresh.map(TimerLogic.stage).sort((a, b) => b.level - a.level)[0];
-      Sound.play(top.sound);
-      Alerts.flash(top.id);
-      Alerts.queueRender();
-    }
+    if (TimerLogic.fresh(t, now).length) Alerts.fireFresh();
     Alerts.setStage(TimerLogic.main(t, now));
     Alerts.scheduleWake(t, now);
+  },
+
+  // 新しく越えた段階を記録して鳴らす（別タブが先に記録した段階は取り込んで鳴らさない）
+  fireFresh() {
+    const t = Store.local.timer;
+    if (!t) return;
+    const disk = Store.peekLocal()?.timer;
+    if (disk && disk.startedAt === t.startedAt && Array.isArray(disk.fired)) t.fired = [...new Set([...t.fired, ...disk.fired])];
+    const fresh = TimerLogic.fresh(t, Date.now());
+    if (!fresh.length) return;
+    t.fired.push(...fresh);
+    Store.saveLocal();
+    // 一度に複数の段階を越えたら（スリープ復帰など）、一番強い段階の音だけ鳴らす
+    const top = fresh.map(TimerLogic.stage).sort((a, b) => b.level - a.level)[0];
+    Sound.play(top.sound);
+    Alerts.flash(top.id);
+    Alerts.queueRender();
   },
 
   setStage(id) {
@@ -308,7 +334,7 @@ const Alerts = {
       if (main && !dismissed.has(main)) return { kind: "timer", stage: TimerLogic.stage(main) };
       if (TimerLogic.due(t, now).includes("loss") && !dismissed.has("loss") && !main) return { kind: "timer", stage: TimerLogic.stage("loss") };
     }
-    if (Store.local.sound.preAlert && !t) {
+    if (Store.local.sound.preAlert && !t && App.tab !== "today") {
       const it = Alerts.preTarget(now);
       if (it && Store.local.alerted[Alerts.preKey(it)] === 1) return { kind: "pre", it };
     }
@@ -328,6 +354,9 @@ const Alerts = {
       return;
     }
     el.dataset.sig = sig;
+    // 読み上げは段階が変わった時の見出しだけ（毎秒・毎分の書き換えは読ませない）
+    const live = document.getElementById("alertLive");
+    if (live) live.textContent = !m ? "" : m.kind === "timer" ? `${m.stage.title} ${m.stage.text}` : `まもなく${CONFIG.SLOTS[m.it.k].label} ${m.it.s.start} 開始`;
     if (!m) {
       el.hidden = true;
       el.innerHTML = "";
@@ -340,8 +369,8 @@ const Alerts = {
       el.dataset.tone = st.id;
       el.innerHTML = `
         <span class="alert-icon" aria-hidden="true">${st.icon}</span>
-        <span class="alert-body"><b>${st.no ? `${st.no}/4 ` : ""}${Util.esc(st.title)}</b><span>${Util.esc(st.text)}</span></span>
-        <button type="button" class="btn small" data-variant="ghost" data-action="tab" data-tab="timer">タイマーを開く</button>
+        <span class="alert-body"><b>${st.no ? `${st.no}/4 ` : ""}<span class="when-wide">${Util.esc(st.title)}</span><span class="when-narrow">${Util.esc(st.name)}</span></b><span>${Util.esc(st.text)}</span></span>
+        <button type="button" class="btn small" data-variant="ghost" data-action="tab" data-tab="timer"><span class="when-wide">タイマーを</span>開く</button>
         <button type="button" class="icon-btn" data-action="alert-dismiss" data-stage="${st.id}" aria-label="閉じる">✕</button>`;
     } else {
       const it = m.it;
@@ -349,7 +378,7 @@ const Alerts = {
       el.dataset.tone = "pre";
       el.innerHTML = `
         <span class="alert-icon" aria-hidden="true">⏰</span>
-        <span class="alert-body"><b>まもなく${def.label} ${Util.esc(it.s.start)} 開始（あと <span data-bind="pre-left">${Util.esc(Util.duration(it.start - now))}</span>）</b><span>${it.s.memo ? `${Util.esc(it.s.memo)}・` : ""}準備を始めよう</span></span>
+        <span class="alert-body"><b>まもなく${def.label} ${Util.esc(it.s.start)} 開始（あと <span data-bind="pre-left" aria-hidden="true">${Util.esc(Util.duration(it.start - now))}</span>）</b><span>${it.s.memo ? `${Util.esc(it.s.memo)}・` : ""}準備を始めよう</span></span>
         ${Ignite.remaining(now) === null ? `<button type="button" class="btn small" data-variant="ghost" data-action="ignite-start">🔥 5分着火</button>` : ""}
         <button type="button" class="btn small" data-variant="primary" data-action="timer-from-slot" data-date="${it.date}" data-slot="${it.k}">▶ 開始</button>
         <button type="button" class="icon-btn" data-action="alert-dismiss" data-pre="${Alerts.preKey(it)}" aria-label="閉じる">✕</button>`;
@@ -435,7 +464,7 @@ const TimerView = {
 
   quick(kind) {
     const now = new Date();
-    return TimerView.begin(CONFIG.TIMER_PRESETS[kind], { date: Util.dateKey(now), slot: TimerView.guessSlot(now), kind, title: "", test: "", source: null });
+    return TimerView.begin(CONFIG.TIMER_PRESETS[kind], { date: TimerView.guessDate(now), slot: TimerView.guessSlot(now), kind, title: "", test: "", source: null });
   },
 
   startCustom(form) {
@@ -449,9 +478,13 @@ const TimerView = {
     }
     const now = new Date();
     const kind = ["flow", "stock", "adjust"].includes(fd.get("kind")) ? fd.get("kind") : "flow";
-    return TimerView.begin(min, { date: Util.dateKey(now), slot: TimerView.guessSlot(now), kind, title: String(fd.get("title") || "").trim(), test: String(fd.get("test") || "").trim(), source: null });
+    return TimerView.begin(min, { date: TimerView.guessDate(now), slot: TimerView.guessSlot(now), kind, title: String(fd.get("title") || "").trim(), test: String(fd.get("test") || "").trim(), source: null });
   },
 
+  // 深夜0〜5時の手動開始は、前日の夜枠（24:00〜）として扱う（予定から開始した場合と日付をそろえる）
+  guessDate(now) {
+    return now.getHours() < 5 ? Util.dateKey(Util.addDays(now, -1)) : Util.dateKey(now);
+  },
   // 手動開始のときの時間帯枠：今の時刻に一番近い既定枠
   guessSlot(now) {
     const m = now.getHours() * 60 + now.getMinutes();
@@ -613,7 +646,7 @@ const TimerView = {
     const main = TimerLogic.main(t, now);
     const st = main ? TimerLogic.stage(main) : null;
     const due = TimerLogic.due(t, now);
-    const showLoss = due.includes("loss") && !(t.dismissed || []).includes("loss") && !["end", "over"].includes(main);
+    const showLoss = due.includes("loss") && !(t.dismissed || []).includes("loss") && !["w5", "end", "over"].includes(main);
     const stale = TimerView.isStale(t, now);
     const endAt = new Date(t.startedAt + (t.pausedMs || 0) + (t.pausedAt ? now - t.pausedAt : 0) + t.durationMin * 60000);
     const def = CONFIG.SLOTS[i.slot];
@@ -631,7 +664,7 @@ const TimerView = {
         <div class="timer-info">
           ${UI.kindBadge(i.kind || "flow")}
           <span class="timer-info-slot">${def ? def.label : ""}${i.date ? ` <span class="num timer-info-date">${Util.md(Util.parseKey(i.date))}</span>` : ""}</span>
-          <span class="timer-info-title">${i.title ? Util.esc(i.title) : '<span class="muted">企画名なし</span>'}</span>
+          <span class="timer-info-title">${i.title ? Util.esc(i.title) : '<span class="timer-info-none">企画名なし</span>'}</span>
           ${i.test ? `<span class="timer-info-test">🧪 ${Util.esc(i.test)}</span>` : ""}
         </div>
 
@@ -646,8 +679,8 @@ const TimerView = {
 
         <div class="timer-meta">
           <span>実経過 <b class="num" data-bind="elapsed">${Math.floor(TimerLogic.elapsedMs(t, now) / 60000)}</b>分</span>
-          <span class="sep">／</span><span>予定 <b class="num">${t.durationMin}</b>分</span>
-          <span class="sep">／</span><span>終了予定 <b class="num" data-bind="end-at">${Util.hm(endAt)}</b></span>
+          <span class="sep" aria-hidden="true">／</span><span>予定 <b class="num">${t.durationMin}</b>分</span>
+          <span class="sep" aria-hidden="true">／</span><span>終了予定 <b class="num" data-bind="end-at">${Util.hm(endAt)}</b></span>
         </div>
 
         ${st ? `<p class="timer-msg"><b>${Util.esc(st.title)}</b>${Util.esc(st.text)}</p>` : ""}
@@ -680,6 +713,9 @@ const TimerView = {
 
   progress(t, now) {
     const total = t.durationMin * 60000;
+    const rem = TimerLogic.remainingMs(t, now);
+    // 予定超過中は、延長上限（+15分）までの進み具合を描く
+    if (rem < 0) return Math.min(100, (-rem / (CONFIG.OVERTIME_LIMIT_MIN * 60000)) * 100);
     return Math.min(100, Math.max(0, (TimerLogic.elapsedMs(t, now) / total) * 100));
   },
 

@@ -50,7 +50,7 @@
     --danger: #f87171;
     --danger-soft: rgb(248 113 113 / 0.14);
     --accent: #60a5fa;
-    --accent-strong: #3b82f6;
+    --accent-strong: #2563eb; /* 白文字で 4.5:1 以上 */
 
     /* 撤退タイマーの段階（この用途以外に使わない。種別色の橙と区別するため黄→赤橙→赤） */
     --alert-judge: #e2e8f0;
@@ -179,7 +179,7 @@
     &:active:not(:disabled) { transform: translateY(1px); }
     &:disabled { opacity: .45; }
     &[data-variant="primary"] { background: var(--accent-strong); border-color: var(--accent-strong); color: #fff; }
-    &[data-variant="primary"]:hover:not(:disabled) { background: #2f6fe0; }
+    &[data-variant="primary"]:hover:not(:disabled) { background: #1d4ed8; }
     &[data-variant="ghost"] { background: transparent; }
     &[data-variant="ghost"]:hover:not(:disabled) { background: var(--bg-raised); }
     &[data-variant="danger"] { background: var(--danger-soft); border-color: rgb(248 113 113 / 0.5); color: var(--danger); }
@@ -688,8 +688,8 @@
   .ignite {
     display: inline-flex; align-items: center; gap: var(--sp-3);
     min-height: 52px; padding: 0 var(--sp-2) 0 var(--sp-4);
-    border-radius: var(--radius-md); border: 1px solid var(--alert-orange); background: var(--alert-orange-soft);
-    & .ignite-label { font-weight: 700; color: var(--alert-orange); }
+    border-radius: var(--radius-md); border: 1px solid var(--accent); background: rgb(96 165 250 / 0.12);
+    & .ignite-label { font-weight: 700; color: var(--accent); }
     & .ignite-time { font-size: var(--fs-xl); font-weight: 700; min-width: 3.2em; }
   }
   @container view (max-width: 599px) {
@@ -828,6 +828,10 @@
   .kpi-details {
     & > summary { cursor: pointer; display: flex; align-items: center; gap: var(--sp-2); min-height: var(--tap); color: var(--text-secondary); font-size: var(--fs-sm); font-weight: 600; }
   }
+  /* 開閉できることを示す印（display:flex で既定の三角が消えるため） */
+  :is(.kpi-details, .kpi-meta, .timer-custom) > summary::before { content: "▸"; flex: none; width: 1em; color: var(--text-muted); }
+  :is(.kpi-details, .kpi-meta, .timer-custom)[open] > summary::before { content: "▾"; }
+  :is(.kpi-details, .kpi-meta, .timer-custom) > summary::-webkit-details-marker { display: none; }
   .kpi-details-body { display: grid; gap: var(--sp-4); padding-top: var(--sp-2); }
   .chip-checks { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
   .chip-check {
@@ -905,9 +909,88 @@
   }
 }
 
+/* ============================================== 実装後レビューの反映（views の上書き） */
+@layer views {
+  /* ---- 赤の段階（ハードストップ）：文字はすべて白 */
+  .timer-info-none { color: var(--text-muted); }
+  .timer-stage[data-stage="end"] :is(.timer-info-none, .timer-info-test, .sep) { color: #fff; }
+  .timer-stage[data-stage="end"] .timer-info-test { border-color: rgb(255 255 255 / 0.6); }
+  .timer-stage:is([data-stage="end"], [data-stage="over"]) .badge { background: rgb(0 0 0 / 0.35); color: #fff; }
+  .alert-banner:is([data-tone="end"], [data-tone="over"]) {
+    color: #fff;
+    & .icon-btn { color: #fff; }
+    & .btn[data-variant="ghost"] { color: #fff; border-color: rgb(255 255 255 / 0.7); }
+  }
+
+  /* ---- 延長上限：白地に赤文字の反転表示（ハードストップと見分ける） */
+  .timer-stage[data-stage="over"] {
+    --ring: var(--alert-red-fill);
+    background: #fff; border-color: var(--alert-red-fill); box-shadow: 0 0 0 4px var(--alert-red), var(--shadow-card);
+  }
+  .timer-stage[data-stage="over"] :is(.timer-stage-label, .timer-info, .timer-info-date, .timer-info-none, .timer-info-test, .timer-meta, .timer-meta b, .timer-msg, .timer-remaining, .timer-remaining-label, .sep) { color: var(--alert-red-fill); }
+  .timer-stage[data-stage="over"] .timer-info-test { border-color: var(--alert-red-fill); }
+  .timer-stage[data-stage="over"] .timer-dial::before { background: conic-gradient(var(--ring) calc(var(--p) * 1%), rgb(185 28 28 / 0.15) 0); }
+  .timer-stage[data-stage="over"] .badge { background: var(--alert-red-fill); color: #fff; }
+  .timer-stage[data-stage="over"] .btn { background: #fff; color: var(--alert-red-fill); border-color: var(--alert-red-fill); }
+  .timer-stage[data-stage="over"] .timer-finish { background: var(--alert-red-fill); color: #fff; border-color: var(--alert-red-fill); }
+  .alert-banner[data-tone="over"] { background: #fff; color: var(--alert-red-fill); border-bottom: 4px solid var(--alert-red-fill);
+    & .alert-body > span, & .icon-btn { color: var(--alert-red-fill); }
+    & .btn[data-variant="ghost"] { color: var(--alert-red-fill); border-color: var(--alert-red-fill); }
+  }
+  .hdr-chip[data-stage="over"] { background: #fff; color: var(--alert-red-fill); border-color: var(--alert-red-fill); }
+
+  /* ---- 段階ラベルを塗りのチップにして、黄・橙・赤を遠くからでも見分ける */
+  .timer-stage:is([data-stage="w20"], [data-stage="w5"], [data-stage="end"], [data-stage="over"]) .timer-stage-label { padding: 0.15em 0.8em; border-radius: var(--radius-pill); }
+  .timer-stage[data-stage="w20"] .timer-stage-label { background: var(--alert-yellow); color: var(--bg-base); }
+  .timer-stage[data-stage="w5"] .timer-stage-label { background: var(--alert-orange); color: var(--bg-base); }
+  .timer-stage[data-stage="end"] .timer-stage-label { background: #fff; color: var(--alert-red-fill); }
+  .timer-stage[data-stage="over"] .timer-stage-label.timer-stage-label { background: var(--alert-red-fill); color: #fff; }
+  .timer-stage:is([data-stage="w20"], [data-stage="w5"]) { border-width: 6px; }
+  .timer-stage:is([data-stage="w20"], [data-stage="w5"]) .timer-info-date { color: var(--text-secondary); } /* 色付きの地でも 4.5:1 を保つ */
+
+  /* ---- 控えめ表示：塗り・点滅をやめ、太い枠線だけにする（配信画面への映り込み対策） */
+  body[data-calm="true"] .timer-stage:is([data-stage="w20"], [data-stage="w5"], [data-stage="end"], [data-stage="over"]) { background: var(--bg-surface); border-width: 6px; box-shadow: none; }
+  body[data-calm="true"] .timer-stage[data-stage="end"] { border-color: var(--alert-red); }
+  body[data-calm="true"] .timer-stage[data-stage="over"] { --ring: var(--alert-red); border-color: var(--alert-red); border-style: double; border-width: 9px; }
+  body[data-calm="true"] .timer-stage[data-stage="over"] :is(.timer-info, .timer-info-date, .timer-info-none, .timer-info-test, .timer-meta, .timer-meta b, .timer-msg, .timer-remaining, .timer-remaining-label, .sep) { color: #fff; }
+  body[data-calm="true"] .timer-stage[data-stage="over"] .timer-dial::before { background: conic-gradient(var(--ring) calc(var(--p) * 1%), var(--bg-raised) 0); }
+  body[data-calm="true"] .timer-stage[data-stage="over"] .btn:not(.timer-finish) { background: var(--bg-raised); color: var(--text-primary); border-color: var(--border-strong); }
+  body[data-calm="true"] :is(.alert-banner, .hero[data-live] .hero-state) { animation: none; }
+  body[data-calm="true"] .alert-banner:is([data-tone="end"], [data-tone="over"]) { background: var(--bg-surface); color: var(--text-primary); border-bottom: 4px solid var(--alert-red);
+    & .alert-body b { color: var(--alert-red); }
+    & .alert-body > span, & .icon-btn { color: var(--text-secondary); }
+    & .btn[data-variant="ghost"] { color: var(--text-primary); border-color: var(--border-strong); }
+  }
+
+  /* ---- iPhone：バナーは1行にまとめ、上部の固定部分を小さく */
+  @media (max-width: 599px) {
+    .alert-banner {
+      flex-wrap: nowrap; gap: var(--sp-2); padding-block: var(--sp-2);
+      & .alert-icon { font-size: 1.2rem; }
+      & .alert-body { flex: 1 1 auto; }
+      & .alert-body b { font-size: var(--fs-sm); }
+      & .alert-body > span, & [data-action="ignite-start"] { display: none; }
+    }
+    .alert-banner .when-wide { display: none; }
+  }
+  @media (min-width: 600px) { .alert-banner .when-narrow { display: none; } }
+  @container view (max-width: 599px) {
+    .timer-meta .sep { display: none; }
+    .timer-meta { column-gap: var(--sp-4); }
+  }
+
+  /* ---- 指で押す端末では、押せる範囲を 44px 以上に */
+  @media (pointer: coarse) {
+    .btn.small, .hdr-chip, .sync-status { min-height: var(--tap); }
+    .sync-status { display: inline-flex; align-items: center; }
+    .segmented > button, .segmented > .seg-radio > span, .chip-check span { min-height: var(--tap); }
+  }
+}
+
 /* ================================================================= utilities */
 @layer utilities {
   .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
   .muted { color: var(--text-muted); }
   .small { font-size: var(--fs-xs); font-weight: 400; }
 }

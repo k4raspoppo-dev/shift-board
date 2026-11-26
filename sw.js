@@ -1,10 +1,16 @@
 // オフラインでも最後に開いた内容を表示するための Service Worker（https で開いた時だけ登録される）
-// アプリを更新したら VERSION を上げる
-const VERSION = "shift-board-v2";
-const ASSETS = ["./", "index.html", "style.css?v=2", "timer.js?v=2", "kpi.js?v=2", "app.js?v=2", "vendor/qrcode.js", "manifest.webmanifest", "icons/icon.svg", "icons/apple-touch-icon.png", "icons/icon-192.png"];
+// アプリを更新したら VERSION と index.html の ?v= を上げる
+const VERSION = "shift-board-v3";
+const ASSETS = ["./", "index.html", "style.css?v=3", "timer.js?v=3", "kpi.js?v=3", "app.js?v=3", "vendor/qrcode.js", "manifest.webmanifest", "icons/icon.svg", "icons/apple-touch-icon.png", "icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // ブラウザの HTTP キャッシュを通さず、最新を取り込む
+  e.waitUntil(
+    caches
+      .open(VERSION)
+      .then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: "reload" }))))
+      .then(() => self.skipWaiting()),
+  );
 });
 
 self.addEventListener("activate", (e) => {
@@ -14,12 +20,14 @@ self.addEventListener("activate", (e) => {
 });
 
 // 同じ場所のファイルだけ：キャッシュを即返しつつ裏で最新を取得（同期の通信には触らない）
+// ページ（index.html）は ?sync=… などが付いても同じものを返す。js / css は ?v= まで一致したものだけ返す
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
+  const isPage = e.request.mode === "navigate";
   e.respondWith(
     caches.open(VERSION).then(async (cache) => {
-      const cached = await cache.match(e.request, { ignoreSearch: true });
+      const cached = await cache.match(e.request, { ignoreSearch: isPage });
       const fresh = fetch(e.request)
         .then((res) => {
           if (res.ok) cache.put(e.request, res.clone());

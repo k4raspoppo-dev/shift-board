@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
   <div class="app-top">
@@ -31,7 +31,8 @@
         <button type="button" class="icon-btn" data-action="open-settings" aria-label="設定とデータ管理">⚙</button>
       </div>
     </header>
-    <div class="alert-banner" id="alertBanner" role="alert" hidden></div>
+    <div class="alert-banner" id="alertBanner" hidden></div>
+    <div class="sr-only" id="alertLive" role="status" aria-live="polite"></div>
   </div>
   <div class="flash-overlay" id="flashOverlay" aria-hidden="true"></div>
 
@@ -49,8 +50,8 @@
 
   <!-- timer.js / kpi.js は定義だけ。起動は app.js の最後で行う -->
   <script src="vendor/qrcode.js"></script>
-  <script src="timer.js?v=2"></script>
-  <script src="kpi.js?v=2"></script>
-  <script src="app.js?v=2"></script>
+  <script src="timer.js?v=3"></script>
+  <script src="kpi.js?v=3"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

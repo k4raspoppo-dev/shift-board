@@ -194,7 +194,8 @@ const Store = {
       ignite: null, // 5分着火タイマー
       kpiDraft: null, // KPI 入力中の下書き
       kpiView: { period: "30", kind: "all", sort: "coin", limit: 30 },
-      sound: { muted: false, preAlert: true, calm: false },
+      // 控えめ表示：PC（サブモニター常駐・配信画面への映り込みが起きやすい）では最初から ON
+      sound: { muted: false, preAlert: true, calm: typeof matchMedia === "function" && matchMedia("(pointer: fine) and (min-width: 1024px)").matches },
       alerted: {}, // 15分前通知の記録 { "YYYY-MM-DD:枠": 1=通知済み / 2=閉じた }
       sync: { url: "", key: "", device: "PC", includeJob: true, rev: 0, dirty: false, lastSyncAt: null, lastError: null },
     };
@@ -215,7 +216,16 @@ const Store = {
       wk.days = wk.days.map((day) => {
         const e = Store.emptyDay();
         const out = { job: CONFIG.JOB_IDS.includes(day?.job) ? day.job : "tbd", slots: {} };
-        for (const k of CONFIG.SLOT_ORDER) out.slots[k] = { ...e.slots[k], ...(day?.slots?.[k] || {}) };
+        for (const k of CONFIG.SLOT_ORDER) {
+          const sl = { ...e.slots[k], ...(day?.slots?.[k] || {}) };
+          // 壊れた値（手で直した JSON・不正な同期データ）は既定値に戻す
+          if (!CONFIG.KINDS[sl.kind]) sl.kind = e.slots[k].kind;
+          if (typeof sl.on !== "boolean") sl.on = !!sl.on;
+          if (!/^\d{1,2}:\d{2}$/.test(sl.start)) sl.start = e.slots[k].start;
+          if (!/^\d{1,2}:\d{2}$/.test(sl.end)) sl.end = e.slots[k].end;
+          for (const f of ["memo", "test"]) if (typeof sl[f] !== "string") sl[f] = sl[f] == null ? "" : String(sl[f]);
+          out.slots[k] = sl;
+        }
         return out;
       });
     }
@@ -261,6 +271,14 @@ const Store = {
   // この端末だけの設定を変更したとき
   saveLocal() {
     Store.write();
+  },
+  // 保存領域に今書かれている local（別タブが書いた最新の状態）を読む
+  peekLocal() {
+    try {
+      return JSON.parse(localStorage.getItem(CONFIG.STORAGE_KEY) || "null")?.local || null;
+    } catch (e) {
+      return null;
+    }
   },
 
   get data() {
@@ -569,24 +587,35 @@ const Sync = {
       const incoming = res.data;
       if (incoming.jobStripped) {
         // 本業を含めない同期のとき、手元の本業シフトは残す
+        let hasJob = false;
         for (const [k, wk] of Object.entries(incoming.weeks || {})) {
           const mine = Store.data.weeks[k];
-          if (mine) wk.days?.forEach((d, i) => (d.job = mine.days[i]?.job || "tbd"));
+          if (mine)
+            wk.days?.forEach((d, i) => {
+              d.job = mine.days[i]?.job || "tbd";
+              if (d.job !== "tbd") hasJob = true;
+            });
         }
         incoming.jobLabels = Store.data.jobLabels;
+        // 本業を含める端末なら、ドライブにも本業を戻しておく（他の端末が古い本業で上書きしないように）
+        if (Sync.cfg.includeJob && hasJob) needPush = true;
       }
       // KPI 記録は id ごとに合流させる（どちらかにしかない記録も消さない）
       const mine = Store.data.kpi?.logs || [];
       const theirs = incoming.kpi?.logs || [];
       const merged = typeof Kpi !== "undefined" ? Kpi.merge(mine, theirs) : theirs.length ? theirs : mine;
-      needPush = typeof Kpi !== "undefined" && Kpi.differs(merged, theirs);
+      if (typeof Kpi !== "undefined" && Kpi.differs(merged, theirs)) needPush = true;
       incoming.kpi = { ...(incoming.kpi || {}), logs: merged };
       Store.state.data = Store.migrateData(incoming);
     }
     Object.assign(Sync.cfg, { rev: res.rev, dirty: needPush, lastSyncAt: new Date().toISOString(), lastError: null });
     Store.write();
     App.safeRender();
-    if (needPush) Sync.schedule(); // 手元にしかない KPI 記録をドライブへ戻す
+    // 手元にしかない KPI 記録・本業をドライブへ戻す（確認ダイアログ中なら閉じた後に送る）
+    if (needPush) {
+      if (Sync.resolving) Sync.pendingPush = true;
+      else Sync.schedule();
+    }
   },
 
   async push(force = false) {
@@ -603,7 +632,11 @@ const Sync = {
       const res = await Sync.call("push", { baseRev: Sync.cfg.rev, data, force });
       // 送信中に編集された分は未送信のまま残す
       if (res.ok) Object.assign(Sync.cfg, { rev: res.rev, dirty: Store.editSeq !== seq, lastSyncAt: new Date().toISOString(), lastError: null });
-      else if (res.error === "conflict") conflict = res;
+      else if (res.error === "conflict") {
+        // 前回の送信はサーバーに届いていて、応答だけ失われた場合：中身が同じなら競合ではない
+        if (res.device === Sync.cfg.device && res.data && JSON.stringify(res.data) === JSON.stringify(data)) Object.assign(Sync.cfg, { rev: res.rev, dirty: Store.editSeq !== seq, lastSyncAt: new Date().toISOString(), lastError: null });
+        else conflict = res;
+      }
       else Sync.cfg.lastError = res.error === "bad_request" && Sync.lastBytes > 950 * 1024 ? "too_large" : res.error;
     } catch (e) {
       Sync.cfg.lastError = "offline";
@@ -645,11 +678,15 @@ const Sync = {
     } else if (res.rev > Sync.cfg.rev) {
       if (Sync.cfg.dirty) await Sync.resolveConflict(res);
       else Sync.apply(res);
-    } else {
-      // サーバー側が作り直された（rev が手元より小さい）→ 手元の内容を送り直す
+    } else if (!res.data) {
+      // ドライブのファイルが作り直された（空）→ 手元の内容を送り直す
       Sync.cfg.rev = res.rev;
       Sync.cfg.dirty = true;
       Sync.push();
+    } else {
+      // バックアップから戻された（rev が手元より小さい）→ 勝手に上書きせず、通常どおり取り込む／確認する
+      if (Sync.cfg.dirty) await Sync.resolveConflict(res);
+      else Sync.apply(res);
     }
   },
 
@@ -658,6 +695,8 @@ const Sync = {
     Sync.resolving = true;
     clearTimeout(Sync.timer);
     try {
+      // 枠の編集や設定のダイアログを開いている間は、閉じるまで待つ（入力を消さない）
+      await UI.waitModalClosed();
       await Sync.askConflict(res);
     } finally {
       Sync.resolving = false;
@@ -729,7 +768,7 @@ const Sync = {
 const UI = {
   kindBadge(kind) {
     const k = CONFIG.KINDS[kind] || CONFIG.KINDS.flow;
-    return `<span class="badge" data-kind="${kind}"><span aria-hidden="true">${k.icon}</span>${k.label}</span>`;
+    return `<span class="badge" data-kind="${Util.esc(kind)}"><span aria-hidden="true">${k.icon}</span>${k.label}</span>`;
   },
   pill(text, tone = "muted") {
     return `<span class="pill" data-tone="${tone}">${Util.esc(text)}</span>`;
@@ -783,17 +822,33 @@ const UI = {
   modal() {
     return document.getElementById("modal");
   },
-  openModal(html, { onClose } = {}) {
+  openModal(html, { onClose, protect = false } = {}) {
     const dlg = UI.modal();
-    if (dlg.open) dlg.close();
+    if (dlg.open) {
+      // 前のダイアログは「キャンセル」として今すぐ片付ける（close イベントは後から届くため）
+      const prev = dlg.onclose;
+      dlg.onclose = null;
+      dlg.returnValue = "";
+      dlg.close();
+      prev?.();
+    }
     dlg.innerHTML = html;
+    dlg.dataset.protect = protect ? "1" : ""; // 入力途中のダイアログ（同期の確認はこれが閉じるまで待つ）
     dlg.onclose = () => {
+      if (dlg.open) return; // 前のダイアログの遅れて届いた close イベント
+      dlg.onclose = null;
       dlg.innerHTML = "";
       onClose?.(dlg.returnValue);
     };
     dlg.returnValue = "";
     dlg.showModal();
     dlg.querySelector("[autofocus]")?.focus();
+  },
+  waitModalClosed() {
+    return new Promise((resolve) => {
+      const check = () => (UI.modal()?.open && UI.modal().dataset.protect === "1" ? setTimeout(check, 300) : resolve());
+      check();
+    });
   },
   closeModal(value = "") {
     const dlg = UI.modal();
@@ -1318,7 +1373,7 @@ const WeekView = {
           <button type="button" class="btn" data-variant="ghost" data-action="modal-return">キャンセル</button>
           <button type="submit" class="btn" data-variant="primary">保存</button>
         </div>
-      </form>`);
+      </form>`, { protect: true });
   },
 
   timeInput(name, value) {
@@ -1631,6 +1686,14 @@ const App = {
     window.addEventListener("focus", App.fastTick);
     window.addEventListener("pageshow", App.fastTick);
     window.addEventListener("online", () => Sync.pull());
+    // 同じブラウザの別タブ・別ウィンドウが保存したら読み込み直す（古い内容で上書きし合わないように）
+    window.addEventListener("storage", (e) => {
+      if (e.key !== CONFIG.STORAGE_KEY || e.newValue == null) return;
+      Store.load();
+      UI.renderSyncStatus();
+      App.safeRender();
+      App.fastTick();
+    });
   },
 
   async onClick(e) {

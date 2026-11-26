@@ -26,7 +26,9 @@ const Kpi = {
     { id: "other", label: "その他" },
   ],
   MIN_SAMPLE: 3, // これ未満の件数の集計は「参考値」
-  TOMBSTONE_DAYS: 180, // 削除フラグを残しておく日数
+  // 削除フラグを残しておく日数。短いと、長く同期していなかった端末の古い記録が復活するので長めに持つ
+  // （削除フラグは id と日時だけの小さな形にするので、容量はほとんど増えない）
+  TOMBSTONE_DAYS: 730,
 
   // 全角数字・カンマ・空白を許して整数に。空なら null、数字でなければ NaN
   toInt(v) {
@@ -63,6 +65,10 @@ const Kpi = {
 
   // 欠けた項目を既定値で埋める（知らない項目は残す）
   normalize(r) {
+    if (r.deleted) {
+      const at = r.updatedAt || r.deletedAt || new Date(0).toISOString();
+      return { id: String(r.id), date: /^\d{4}-\d{2}-\d{2}$/.test(r.date) ? r.date : "", deleted: true, deletedAt: r.deletedAt || at, updatedAt: at, createdAt: r.createdAt || at };
+    }
     const slot = CONFIG.SLOT_ORDER.includes(r.slot) ? r.slot : "morning";
     const kind = CONFIG.KINDS[r.kind] ? r.kind : "flow";
     const short = r.short && typeof r.short === "object" ? r.short : {};
@@ -352,6 +358,12 @@ const KpiView = {
         Store.saveLocal();
         form.querySelector("details.kpi-meta")?.setAttribute("open", "");
       }
+      // 直すべき欄へ移動する
+      const bad = /実配信/.test(errors.join()) ? form.querySelector('[name="minutes"]') : /日付/.test(errors.join()) ? form.querySelector('[name="date"]') : null;
+      if (bad) {
+        bad.scrollIntoView({ block: "center", behavior: "smooth" });
+        bad.focus({ preventScroll: true });
+      } else err.scrollIntoView({ block: "center", behavior: "smooth" });
       return;
     }
     const nowIso = new Date().toISOString();
@@ -437,6 +449,7 @@ const KpiView = {
         if (!ok) return;
         const now = new Date().toISOString();
         Object.assign(r, { deleted: true, deletedAt: now, updatedAt: now });
+        Store.data.kpi.logs = Store.data.kpi.logs.map((x) => (x.id === r.id ? Kpi.normalize(x) : x)); // 削除フラグだけの小さな形にする
         if (Store.local.kpiDraft?.id === r.id) Store.local.kpiDraft = KpiView.newDraft();
         Store.save();
         return KpiView.rerenderKeepScroll();
@@ -517,6 +530,7 @@ const KpiView = {
     const d = KpiView.draft();
     const { record } = Kpi.fromDraft(d);
     const editing = d.id && Store.data.kpi.logs.some((r) => r.id === d.id && !r.deleted);
+    const minutesInMeta = String(d.minutes ?? "").trim() !== ""; // 未入力なら数値欄の先頭に出す（時給の分母なので）
     return `
       <section class="panel kpi-form-panel">
         <div class="kpi-form-head">
@@ -538,16 +552,16 @@ const KpiView = {
               </div>
               <label class="field"><span class="field-label">企画・ゲーム名</span><input class="input" type="text" name="title" value="${Util.esc(d.title)}" list="kpiTitleList" enterkeyhint="next">
                 <datalist id="kpiTitleList">${KpiView.titleSuggestions().map((m) => `<option value="${Util.esc(m)}">`).join("")}</datalist></label>
-              <label class="field"><span class="field-label">実配信時間（分）</span><input class="input num" type="text" inputmode="numeric" pattern="[0-9]*" name="minutes" value="${Util.esc(d.minutes)}" enterkeyhint="next"></label>
+              ${minutesInMeta ? `<label class="field"><span class="field-label">実配信時間（分）</span><input class="input num" type="text" inputmode="numeric" pattern="[0-9]*" name="minutes" value="${Util.esc(d.minutes)}" enterkeyhint="next"></label>` : ""}
               <label class="field"><span class="field-label">🧪 試した変更点（A/Bテスト変数）</span><input class="input" type="text" name="test" value="${Util.esc(d.test)}" maxlength="60" enterkeyhint="next"></label>
             </div>
           </details>
 
           <div class="kpi-nums">
+            ${minutesInMeta ? "" : KpiView.numField("minutes", "実配信時間（必須）", "分", d.minutes)}
             ${KpiView.numField("coins", "獲得コイン", "枚", d.coins)}
             ${KpiView.numField("gifters", "ギフター", "人", d.gifters)}
             ${KpiView.numField("follows", "新規フォロワー", "人", d.follows)}
-            ${KpiView.numField("peakViewers", "最大同接", "人", d.peakViewers)}
             <div class="kpi-num">
               <span class="kpi-num-label" id="viewLabel">平均視聴時間</span>
               <span class="kpi-num-pair" role="group" aria-labelledby="viewLabel">
@@ -555,6 +569,7 @@ const KpiView = {
                 <span class="kpi-num-box"><input class="input num" type="text" inputmode="numeric" pattern="[0-9]*" name="viewSec" value="${Util.esc(d.viewSec)}" maxlength="2" aria-label="平均視聴時間（秒）" enterkeyhint="next"><span class="kpi-unit">秒</span></span>
               </span>
             </div>
+            ${KpiView.numField("peakViewers", "最大同接", "人", d.peakViewers)}
           </div>
 
           <fieldset class="kpi-short">
@@ -581,8 +596,8 @@ const KpiView = {
             </div>
           </details>
 
-          <div class="kpi-preview" data-bind="kpi-preview" aria-live="polite">${KpiView.previewHtml(record)}</div>
-          <p class="form-error" data-form-error hidden></p>
+          <div class="kpi-preview" data-bind="kpi-preview">${KpiView.previewHtml(record)}</div>
+          <p class="form-error" data-form-error role="alert" hidden></p>
           <div class="kpi-actions">
             <button type="button" class="btn" data-variant="ghost" data-action="kpi-clear">${editing ? "編集をやめる" : "クリア"}</button>
             <button type="submit" class="btn big kpi-save" data-variant="primary">${editing ? "更新して保存" : "保存する"}</button>
